@@ -1,11 +1,11 @@
-name: Inspect TingShu Source Structure
+name: Build TingShu Jar
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  inspect:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout CustomSources
@@ -14,10 +14,284 @@ jobs:
           repository: eprendre/tingshu
           ref: master
 
-      - name: Dump Template Source Files
+      - name: Set up JDK 18
+        uses: actions/setup-java@v4
+        with:
+          java-version: '18'
+          distribution: 'zulu'
+
+      - name: Prepare Directories and Source Code
         run: |
-          echo "=== 1. BUILD GRADLE ==="
-          cat CustomSources/build.gradle || true
-          echo ""
-          echo "=== 2. ALL KOTLIN FILES IN REPO ==="
-          find CustomSources/src/main/kotlin -name "*.kt" -exec echo "--- FILE: {} ---" \; -exec cat {} \;
+          mkdir -p CustomSources/src/main/kotlin/com/github/eprendre/sources_by_itingshu
+          sed -i 's/MY_SOURCES_PACKAGE=.*/MY_SOURCES_PACKAGE=sources_by_itingshu/' CustomSources/gradle.properties
+
+          cat << 'EOF' > CustomSources/src/main/kotlin/com/github/eprendre/sources_by_itingshu/SourceEntry.kt
+          package com.github.eprendre.sources_by_itingshu
+
+          import com.github.eprendre.tingshu.sources.TingShu
+
+          object SourceEntry {
+              @JvmStatic
+              fun getDesc(): String = "听书源"
+
+              @JvmStatic
+              fun getCategory(): String = "听书"
+
+              @JvmStatic
+              fun getSources(): List<TingShu> = listOf(ITingShu)
+          }
+          EOF
+
+          cat << 'EOF' > CustomSources/src/main/kotlin/com/github/eprendre/sources_by_itingshu/ITingShu.kt
+          package com.github.eprendre.sources_by_itingshu
+
+          import com.github.eprendre.tingshu.extensions.config
+          import com.github.eprendre.tingshu.sources.AudioUrlCustomExtractor
+          import com.github.eprendre.tingshu.sources.AudioUrlExtraHeaders
+          import com.github.eprendre.tingshu.sources.AudioUrlExtractor
+          import com.github.eprendre.tingshu.sources.TingShu
+          import com.github.eprendre.tingshu.utils.*
+          import com.github.kittinunf.fuel.Fuel
+          import org.json.JSONObject
+          import org.jsoup.Jsoup
+          import kotlin.random.Random
+
+          object ITingShu : TingShu(), AudioUrlExtraHeaders {
+              private const val ENCRYPT_TABLE = "PXhw7U1B0a9kQDKZsTjIASmOeNzxYG4CHo1JyRfg2b8FLpEvr3FtVnlqMidu6c"
+
+              override fun getSourceId(): String = "9a629b3f07a64f33b1e3e7869ad23412"
+
+              override fun getUrl(): String = "https://www.itingshu.net"
+
+              override fun getName(): String = "爱听书"
+
+              override fun getDesc(): String = "推荐指数:5星 ⭐⭐⭐⭐⭐\n爱听书最新原生免WebView音源"
+
+              override fun isWebViewNotRequired(): Boolean = true
+
+              override fun isSearchable(): Boolean = true
+
+              override fun isDiscoverable(): Boolean = true
+
+              override fun isCacheable(): Boolean = true
+
+              override fun getCategoryMenus(): List<CategoryMenu> {
+                  val menu1 = CategoryMenu(
+                      "有声小说", listOf(
+                          CategoryTab("玄幻修真", "https://www.itingshu.net/yousheng/xuanhuan/lastupdate/1.html"),
+                          CategoryTab("都市言情", "https://www.itingshu.net/yousheng/dushi/lastupdate/1.html"),
+                          CategoryTab("灵异惊悚", "https://www.itingshu.net/yousheng/lingyi/lastupdate/1.html"),
+                          CategoryTab("军事历史", "https://www.itingshu.net/yousheng/junshi/lastupdate/1.html"),
+                          CategoryTab("儿童故事", "https://www.itingshu.net/yousheng/ertong/lastupdate/1.html"),
+                          CategoryTab("经典纪实", "https://www.itingshu.net/yousheng/jishi/lastupdate/1.html"),
+                          CategoryTab("网游竞技", "https://www.itingshu.net/yousheng/wangyou/lastupdate/1.html")
+                      )
+                  )
+                  val menu2 = CategoryMenu(
+                      "其它", listOf(
+                          CategoryTab("长篇评书", "https://www.itingshu.net/yousheng/pingshu/lastupdate/1.html"),
+                          CategoryTab("相声戏曲", "https://www.itingshu.net/yousheng/xiangsheng/lastupdate/1.html"),
+                          CategoryTab("官场商战", "https://www.itingshu.net/yousheng/guanchang/lastupdate/1.html")
+                      )
+                  )
+                  return listOf(menu1, menu2)
+              }
+
+              override fun getCategoryList(url: String): Category {
+                  val doc = Jsoup.connect(url).config(true).get()
+
+                  val nextUrl = doc.select(".fanye a").firstOrNull { it.text().contains("下页") || it.text().contains("下一页") }?.attr("abs:href") ?: ""
+                  val currentPage = Regex("/(\\d+)\\.html").find(url)?.groupValues?.get(1)?.toInt() ?: 1
+                  val totalPage = doc.selectFirst(".fanye")?.children()
+                      ?.map { it.ownText() }
+                      ?.filter { it.matches("\\d+".toRegex()) }
+                      ?.lastOrNull()?.toInt() ?: if (nextUrl.isNotEmpty()) currentPage + 1 else currentPage
+
+                  val list = ArrayList<Book>()
+                  val elementList = doc.select(".list-works li, div.list_item")
+                  elementList.forEach { element ->
+                      val coverUrl = element.selectFirst(".list-imgbox img, img")?.let { img ->
+                          val src = img.attr("data-original").ifEmpty { img.attr("src") }
+                          if (src.startsWith("//")) "https:$src" else src
+                      } ?: ""
+                      val titleElement = element.selectFirst(".list-book-dt a, h3.title a") ?: return@forEach
+                      val bookUrl = titleElement.absUrl("href")
+                      val title = titleElement.ownText().ifEmpty { titleElement.text() }
+                      val author = element.selectFirst(".book-author, p.author")?.text()?.replace("作者：", "")?.trim() ?: ""
+                      val artist = element.selectFirst(".book-artist, p.actor")?.text()?.replace("演播：", "")?.trim() ?: ""
+                      val intro = element.selectFirst(".list-book-des, p.desc")?.text()?.trim() ?: ""
+                      val status = element.selectFirst(".book-status, span.status")?.text()?.trim() ?: ""
+
+                      list.add(Book(coverUrl, bookUrl, title, author, artist).apply {
+                          this.intro = intro
+                          this.status = status
+                          this.sourceId = getSourceId()
+                      })
+                  }
+
+                  return Category(list, currentPage, totalPage, url, nextUrl)
+              }
+
+              override fun search(keywords: String, page: Int): Pair<List<Book>, Int> {
+                  val searchUrl = "https://www.itingshu.net/novelsearch/search/result.html"
+                  val doc = Jsoup.connect(searchUrl).config(true)
+                      .data(mapOf("searchword" to keywords, "page" to page.toString(), "searchtype" to "0"))
+                      .post()
+
+                  val nextUrl = doc.select(".fanye a").firstOrNull { it.text().contains("下页") || it.text().contains("下一页") }?.attr("abs:href") ?: ""
+                  val totalPage = doc.selectFirst(".fanye")?.children()
+                      ?.map { it.ownText() }
+                      ?.filter { it.matches("\\d+".toRegex()) }
+                      ?.lastOrNull()?.toInt() ?: if (nextUrl.isNotEmpty()) page + 1 else page
+
+                  val list = ArrayList<Book>()
+                  val elementList = doc.select(".list-works li, div.search-list div.list_item, div.list_item")
+                  elementList.forEach { element ->
+                      val coverUrl = element.selectFirst(".list-imgbox img, img")?.let { img ->
+                          val src = img.attr("data-original").ifEmpty { img.attr("src") }
+                          if (src.startsWith("//")) "https:$src" else src
+                      } ?: ""
+                      val titleElement = element.selectFirst(".list-book-dt a, h3.title a") ?: return@forEach
+                      val bookUrl = titleElement.absUrl("href")
+                      val title = titleElement.ownText().ifEmpty { titleElement.text() }
+                      val author = element.selectFirst(".book-author, p.author")?.text()?.replace("作者：", "")?.trim() ?: ""
+                      val artist = element.selectFirst(".book-artist, p.actor")?.text()?.replace("演播：", "")?.trim() ?: ""
+                      val intro = element.selectFirst(".list-book-des, p.desc")?.text()?.trim() ?: ""
+                      val status = element.selectFirst(".book-status, span.status")?.text()?.trim() ?: ""
+
+                      list.add(Book(coverUrl, bookUrl, title, author, artist).apply {
+                          this.intro = intro
+                          this.status = status
+                          this.sourceId = getSourceId()
+                      })
+                  }
+
+                  return Pair(list, totalPage)
+              }
+
+              override fun getBookDetailInfo(bookUrl: String, loadEpisodes: Boolean, loadFullPages: Boolean): BookDetail {
+                  val episodes = ArrayList<Episode>()
+                  var currentIntro = ""
+                  var artist = ""
+                  var author = ""
+                  var coverUrl = ""
+
+                  val doc = Jsoup.connect(bookUrl).config(true).get()
+                  currentIntro = doc.selectFirst(".book-des, dd.list-book-des, p.desc")?.ownText()?.trim() ?: ""
+                  coverUrl = doc.selectFirst(".list-imgbox img, .book-img img")?.absUrl("src") ?: ""
+
+                  if (loadEpisodes) {
+                      val playlistHref = doc.selectFirst("a[href*='/itingshus/']")?.attr("href") ?: ""
+                      if (playlistHref.isNotEmpty()) {
+                          val playlistBaseUrl = if (playlistHref.startsWith("http")) playlistHref else "https://www.itingshu.net$playlistHref"
+                          var currentPage = 1
+                          while (true) {
+                              val pageUrl = "$playlistBaseUrl?page=$currentPage&sort=asc"
+                              try {
+                                  val pageDoc = Jsoup.connect(pageUrl).config(true).referrer(bookUrl).get()
+                                  val items = pageDoc.select("ul.playlist li a, div.play-list a, a[href*='/play/']")
+                                  if (items.isEmpty()) break
+
+                                  var newCount = 0
+                                  items.forEach { a ->
+                                      val href = a.attr("href")
+                                      if (href.contains("/play/")) {
+                                          val title = a.text().trim()
+                                          val playUrl = if (href.startsWith("http")) href else "https://www.itingshu.net$href"
+                                          episodes.add(Episode(title, playUrl))
+                                          newCount++
+                                      }
+                                  }
+                                  if (newCount < 50 || !loadFullPages) break
+                                  currentPage++
+                              } catch (e: Exception) {
+                                  break
+                              }
+                          }
+                      } else {
+                          doc.select("#playlist li a, ul.playlist li a, a[href*='/play/']").forEach { a ->
+                              val href = a.attr("href")
+                              if (href.contains("/play/")) {
+                                  val title = a.text().trim()
+                                  val playUrl = if (href.startsWith("http")) href else "https://www.itingshu.net$href"
+                                  episodes.add(Episode(title, playUrl))
+                              }
+                          }
+                      }
+                  }
+
+                  return BookDetail(episodes, currentIntro, artist, author, coverUrl = coverUrl)
+              }
+
+              override fun getAudioUrlExtractor(): AudioUrlExtractor {
+                  AudioUrlCustomExtractor.setUp { chapterUrl ->
+                      try {
+                          val html = Fuel.get(chapterUrl)
+                              .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                              .header("Referer", "https://www.itingshu.net/")
+                              .responseString().third.get()
+
+                          val doc = Jsoup.parse(html)
+                          val metaB = doc.selectFirst("meta[name=_b]")?.attr("content") ?: ""
+                          val metaP = doc.selectFirst("meta[name=_p]")?.attr("content") ?: ""
+                          val metaC = doc.selectFirst("meta[name=_c]")?.attr("content") ?: ""
+                          val metaD = doc.selectFirst("meta[name=_d]")?.attr("content") ?: "read"
+
+                          val spHeader = encodeSp(metaP)
+                          val apiUrl = "https://www.itingshu.net/api/mapi/play"
+                          val postData = "nid=$metaB&cid=$metaC&sort=$metaD"
+
+                          val jsonStr = Fuel.post(apiUrl)
+                              .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                              .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+                              .header("X-Requested-With", "XMLHttpRequest")
+                              .header("Referer", chapterUrl)
+                              .header("sc", metaC)
+                              .header("sp", spHeader)
+                              .body(postData)
+                              .responseString().third.get()
+
+                          val json = JSONObject(jsonStr)
+                          return@setUp json.optString("m4a").ifEmpty { json.optString("mp3") }
+                      } catch (e: Exception) {
+                          e.printStackTrace()
+                          return@setUp ""
+                      }
+                  }
+                  return AudioUrlCustomExtractor
+              }
+
+              override fun headers(audioUrl: String): Map<String, String> {
+                  val hashMap = hashMapOf<String, String>()
+                  hashMap["Referer"] = "https://www.itingshu.net/"
+                  hashMap["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                  return hashMap
+              }
+
+              private fun encodeSp(raw: String): String {
+                  val sb = StringBuilder()
+                  for (c in raw) {
+                      val idx = ENCRYPT_TABLE.indexOf(c)
+                      val shifted = if (idx == -1) c else ENCRYPT_TABLE[(idx + 3) % 62]
+                      val r1 = ENCRYPT_TABLE[Random.nextInt(62)]
+                      val r2 = ENCRYPT_TABLE[Random.nextInt(62)]
+                      sb.append(r1).append(shifted).append(r2)
+                  }
+                  return sb.toString()
+              }
+          }
+          EOF
+
+      - name: Build with Gradle and D8
+        run: |
+          chmod +x CustomSources/gradlew dx/d8
+          cd CustomSources
+          ./gradlew jar --no-daemon --stacktrace
+          cd ..
+          cp CustomSources/build/libs/sources_by_itingshu.jar ./sources_by_itingshu.jar
+
+      - name: Upload Jar Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sources_by_itingshu
+          path: sources_by_itingshu.jar
