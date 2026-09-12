@@ -1,0 +1,39 @@
+name: Decompile Jar to Source
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '*.jar'
+
+jobs:
+  decompile:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install JADX
+        run: |
+          wget -q https://github.com/skylot/jadx/releases/download/v1.5.0/jadx-1.5.0.zip
+          unzip -q jadx-1.5.0.zip -d jadx
+
+      - name: Decompile JAR
+        run: |
+          JAR_FILE=$(find . -maxdepth 1 -name "*.jar" | head -n 1)
+          if [ -n "$JAR_FILE" ]; then
+            echo "Found jar: $JAR_FILE, decompiling..."
+            ./jadx/bin/jadx -d decompiled_src "$JAR_FILE"
+          else
+            echo "No jar file found!" && exit 1
+          fi
+
+      - name: Commit and Push Decompiled Code
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add decompiled_src/
+          git commit -m "Auto decompiled source code" || exit 0
+          git push
