@@ -1,10 +1,8 @@
 name: Decompile Jar to Source
 
 on:
-  workflow_dispatch:
   push:
-    paths:
-      - '*.jar'
+  workflow_dispatch:
 
 jobs:
   decompile:
@@ -14,26 +12,64 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
       - name: Install JADX
         run: |
           wget -q https://github.com/skylot/jadx/releases/download/v1.5.0/jadx-1.5.0.zip
           unzip -q jadx-1.5.0.zip -d jadx
+          chmod +x jadx/bin/jadx
 
-      - name: Decompile JAR
+      - name: Decompile All JARs
         run: |
-          JAR_FILE=$(find . -maxdepth 1 -name "*.jar" | head -n 1)
-          if [ -n "$JAR_FILE" ]; then
-            echo "Found jar: $JAR_FILE, decompiling..."
-            ./jadx/bin/jadx -d decompiled_src "$JAR_FILE"
-          else
-            echo "No jar file found!" && exit 1
+          echo "=== 1. CURRENT FILES IN REPO ==="
+          ls -la
+          echo ""
+          # 查找所有 jar 文件（排除 jadx 自身）
+          JAR_FILES=$(find . -name "*.jar" ! -path "*/jadx/*" ! -path "*/.gradle/*")
+          echo "Found JAR files: $JAR_FILES"
+
+          if [ -z "$JAR_FILES" ]; then
+            echo "ERROR: 没有在仓库中找到任何 .jar 文件！请确认您是否已将 jar 上传到仓库。"
+            exit 1
           fi
 
-      - name: Commit and Push Decompiled Code
+          for jar in $JAR_FILES; do
+            echo "Decompiling: $jar ..."
+            ./jadx/bin/jadx -d decompiled_src "$jar" || true
+          done
+
+      - name: Print Decompiled Code in Log
+        run: |
+          echo "=== 2. DECOMPILED JAVA FILES ==="
+          find decompiled_src -name "*.java" | while read f; do
+            echo "========================================"
+            echo "FILE: $f"
+            echo "========================================"
+            cat "$f"
+          done
+
+      - name: Commit and Push to Repository
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add decompiled_src/
-          git commit -m "Auto decompiled source code" || exit 0
-          git push
+          git add decompiled_src
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Auto decompiled source code"
+            git push origin HEAD || echo "Push failed, but artifact is available."
+          fi
+
+      - name: Upload Decompiled Sources as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiled_sources
+          path: decompiled_src/
